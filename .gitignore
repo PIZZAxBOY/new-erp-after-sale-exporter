@@ -1,0 +1,9 @@
+node_modules/
+downloads/
+exports/
+logs/
+*.xlsx
+*.tmp
+*.log
+config.json
+.env
