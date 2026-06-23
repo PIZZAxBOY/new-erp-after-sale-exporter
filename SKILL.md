@@ -71,11 +71,13 @@ node --check new-erp-after-sale-cron.js
 node new-erp-after-sale-cron.js --help
 ```
 
-Run a normal export:
+Run the first real smoke test with a short range:
 
 ```bash
-node new-erp-after-sale-cron.js --brand YS --months 6
+node new-erp-after-sale-cron.js --brand YS --months 1
 ```
+
+Use a longer range, such as `--months 6`, only after the login, export-task creation, download-center matching, and xlsx download path have been verified.
 
 Run a backfill:
 

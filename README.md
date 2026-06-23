@@ -107,11 +107,13 @@ node --check new-erp-after-sale-cron.js
 node new-erp-after-sale-cron.js --help
 ```
 
-Run a real smoke test only when valid ERP credentials and network access are available:
+Run a real smoke test only when valid ERP credentials and network access are available. Start with a short range so the first run finishes quickly:
 
 ```bash
-node new-erp-after-sale-cron.js --brand <BRAND_CODE> --months 6
+node new-erp-after-sale-cron.js --brand <BRAND_CODE> --months 1
 ```
+
+After the first run verifies login, export creation, download-center matching, and xlsx download, increase the range as needed.
 
 ## Notes
 
