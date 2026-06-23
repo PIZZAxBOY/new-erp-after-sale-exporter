@@ -24,7 +24,7 @@ Usage:
   node new-erp-after-sale-cron.js [options]
 
 Options:
-  --brand <BRAND_CODE>        Brand code for this run. Overrides config/env.
+  --brand <BRAND_CODE>        Optional brand code for this run. Omit to export all brands.
   --months <N>                Export up to the previous N months. Default: 6.
   --download-dir <DIR>        Directory for downloaded xlsx files.
   --config <PATH>             Custom config file path.
@@ -165,7 +165,7 @@ async function loadConfig(args) {
   };
 
   const missing = [];
-  for (const key of ['baseUrl', 'username', 'password', 'brand', 'downloadDir']) {
+  for (const key of ['baseUrl', 'username', 'password', 'downloadDir']) {
     if (!config[key]) {
       missing.push(key);
     }
@@ -175,14 +175,11 @@ async function loadConfig(args) {
   }
 
   config.baseUrl = String(config.baseUrl).replace(/\/+$/, '');
-  config.brand = String(config.brand).trim();
+  config.brand = config.brand ? String(config.brand).trim() : '';
   config.downloadDir = path.resolve(String(config.downloadDir));
 
   if (!/^https?:\/\//i.test(config.baseUrl)) {
     fail('baseUrl must start with http:// or https://');
-  }
-  if (!config.brand) {
-    fail('brand must not be empty');
   }
 
   return config;
@@ -282,7 +279,6 @@ async function login(config) {
 
 async function createExportTask(config, token, dateRange) {
   const params = new URLSearchParams({
-    auction_site: config.brand,
     after_type_status: '3',
     created_at: dateRange.createdAt,
     search_type: 'transaction_id',
@@ -290,6 +286,9 @@ async function createExportTask(config, token, dateRange) {
     is_hx_export: '0',
     _t: String(Date.now()),
   });
+  if (config.brand) {
+    params.set('auction_site', config.brand);
+  }
 
   const response = await requestJson(config, {
     method: 'GET',
@@ -409,13 +408,15 @@ function matchesBaseDownloadTask(task) {
 
 function matchesAddCondition(addCondition, brand, dateRange) {
   const variants = conditionVariants(addCondition);
-  const lowerBrand = String(brand).toLowerCase();
+  const normalizedBrand = String(brand || '').toLowerCase();
   const startVariants = conditionVariants(dateRange.startDateTime);
   const endVariants = conditionVariants(dateRange.endDateTime);
 
   return variants.some((variant) => {
     const lower = variant.toLowerCase();
-    const hasBrand = lower.includes(lowerBrand);
+    const hasBrand = normalizedBrand
+      ? lower.includes(normalizedBrand)
+      : !hasNonEmptyAuctionSite(lower);
     const hasAfterType = [
       'after_type_status=3',
       'after_type_status%3d3',
@@ -426,6 +427,17 @@ function matchesAddCondition(addCondition, brand, dateRange) {
     const hasStart = startVariants.some((needle) => lower.includes(needle.toLowerCase()));
     const hasEnd = endVariants.some((needle) => lower.includes(needle.toLowerCase()));
     return hasBrand && hasAfterType && hasStart && hasEnd;
+  });
+}
+
+function hasNonEmptyAuctionSite(lowerCondition) {
+  return [
+    /auction_site=([^&\s"'{}[\],]+)/,
+    /auction_site%3d([^&\s"'{}[\],]+)/,
+    /auction_site["']?\s*:\s*["']([^"']+)["']/,
+  ].some((pattern) => {
+    const match = lowerCondition.match(pattern);
+    return match && match[1] && !['null', 'undefined'].includes(match[1]);
   });
 }
 
@@ -493,7 +505,8 @@ async function downloadXlsx(config, token, task, dateRange) {
   }
 
   await fsp.mkdir(config.downloadDir, { recursive: true });
-  const fileName = `after-sale-${config.brand}-complaints-${dateRange.startDate}-${dateRange.endDate}.xlsx`;
+  const scope = exportScopeLabel(config);
+  const fileName = `after-sale-${scope}-complaints-${dateRange.startDate}-${dateRange.endDate}.xlsx`;
   const finalPath = path.join(config.downloadDir, fileName);
   const tmpPath = `${finalPath}.tmp-${process.pid}-${Date.now()}`;
 
@@ -607,14 +620,15 @@ function sleep(ms) {
 
 async function acquireLock(config) {
   await fsp.mkdir(config.downloadDir, { recursive: true });
-  const safeBrand = config.brand.replace(/[^a-zA-Z0-9_-]/g, '_');
-  const lockPath = path.join(config.downloadDir, `.new-erp-after-sale-${safeBrand}.lock`);
+  const safeScope = exportScopeLabel(config).replace(/[^a-zA-Z0-9_-]/g, '_');
+  const lockPath = path.join(config.downloadDir, `.new-erp-after-sale-${safeScope}.lock`);
 
   try {
     const handle = await fsp.open(lockPath, 'wx', 0o600);
     await handle.writeFile(JSON.stringify({
       pid: process.pid,
-      brand: config.brand,
+      brand: config.brand || null,
+      scope: exportScopeLabel(config),
       startedAt: new Date().toISOString(),
     }));
     await handle.close();
@@ -631,8 +645,12 @@ async function acquireLock(config) {
       return acquireLock(config);
     }
 
-    fail(`Lock file exists for brand ${config.brand}: ${lockPath}`);
+    fail(`Lock file exists for export scope ${exportScopeLabel(config)}: ${lockPath}`);
   }
+}
+
+function exportScopeLabel(config) {
+  return config.brand || 'all-brands';
 }
 
 async function releaseLock(lockPath) {
@@ -656,7 +674,7 @@ async function main() {
     lockPath = await acquireLock(config);
     log('Starting export', {
       baseUrl: config.baseUrl,
-      brand: config.brand,
+      brand: config.brand || 'ALL',
       start: dateRange.startDateTime,
       end: dateRange.endDateTime,
       downloadDir: config.downloadDir,

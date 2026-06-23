@@ -1,6 +1,6 @@
 # New ERP After-Sale Complaint Exporter
 
-Pure Node.js script for exporting New ERP after-sale complaint tickets by brand and downloading the result as an `.xlsx` file.
+Pure Node.js script for exporting New ERP after-sale complaint tickets and downloading the result as an `.xlsx` file. By default it exports all brands; pass `--brand` only when a single brand is needed.
 
 ERP base URL:
 
@@ -44,10 +44,12 @@ Example:
   "baseUrl": "https://new-erp.sz-jyhc.com/",
   "username": "<ERP_USERNAME>",
   "password": "<ERP_PASSWORD>",
-  "brand": "<BRAND_CODE>",
+  "brand": "",
   "downloadDir": "./downloads"
 }
 ```
+
+`brand` is optional. Leave it empty or omit it to include all brands.
 
 Recommended permissions:
 
@@ -66,9 +68,12 @@ ERP_BRAND
 ERP_DOWNLOAD_DIR
 ```
 
+`ERP_BRAND` is optional. Leave it unset to include all brands.
+
 ## Usage
 
 ```bash
+node new-erp-after-sale-cron.js
 node new-erp-after-sale-cron.js --brand YS
 node new-erp-after-sale-cron.js --brand HX --months 3 --download-dir ./exports
 node new-erp-after-sale-cron.js --config ./config.json --brand JY
@@ -78,7 +83,7 @@ node new-erp-after-sale-cron.js --brand YS --start-date 2026-01-01 --end-date 20
 Supported flags:
 
 ```text
---brand <BRAND_CODE>        Brand code for this run
+--brand <BRAND_CODE>        Optional brand code for this run; omit for all brands
 --months <N>                Up to previous N months, default 6
 --download-dir <DIR>        Download directory for this run
 --config <PATH>             Custom config file path
@@ -95,7 +100,7 @@ For generated month ranges, the start date is moved one day inside the boundary.
 File naming rule:
 
 ```text
-after-sale-<BRAND_CODE>-complaints-<YYYY-MM-DD>-<YYYY-MM-DD>.xlsx
+after-sale-<BRAND_CODE|all-brands>-complaints-<YYYY-MM-DD>-<YYYY-MM-DD>.xlsx
 ```
 
 The script validates the downloaded file header as `504b0304` before writing the final `.xlsx`. It writes a temporary file first and then renames it to avoid partial files.
@@ -110,7 +115,7 @@ node new-erp-after-sale-cron.js --help
 Run a real smoke test only when valid ERP credentials and network access are available. Start with a short range so the first run finishes quickly:
 
 ```bash
-node new-erp-after-sale-cron.js --brand <BRAND_CODE> --months 1
+node new-erp-after-sale-cron.js --months 1
 ```
 
 After the first run verifies login, export creation, download-center matching, and xlsx download, increase the range as needed.
