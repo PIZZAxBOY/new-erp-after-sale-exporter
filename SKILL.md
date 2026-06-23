@@ -84,6 +84,7 @@ node new-erp-after-sale-cron.js --brand YS --start-date 2026-01-01 --end-date 20
 ```
 
 Use `--start-date` and `--end-date` ahead of `--months` when explicit date ranges are supplied.
+For generated month ranges, keep the start date one day inside the boundary. For example, a 6-month run ending on `2026-06-23` should start at `2025-12-24 00:00:00`, not `2025-12-23 00:00:00`, because ERP rejects inclusive ranges that it considers over half a year.
 
 ## ERP Contract
 

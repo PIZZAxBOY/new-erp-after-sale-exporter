@@ -79,7 +79,7 @@ Supported flags:
 
 ```text
 --brand <BRAND_CODE>        Brand code for this run
---months <N>                Previous N months, default 6
+--months <N>                Up to previous N months, default 6
 --download-dir <DIR>        Download directory for this run
 --config <PATH>             Custom config file path
 --start-date YYYY-MM-DD     Explicit start date for backfill
@@ -88,6 +88,7 @@ Supported flags:
 ```
 
 When `--start-date` or `--end-date` is provided, date flags take priority over `--months`.
+For generated month ranges, the start date is moved one day inside the boundary. For example, a 6-month run ending on `2026-06-23` starts at `2025-12-24 00:00:00`, avoiding ERP's "超过半年无法导出" limit.
 
 ## Output
 

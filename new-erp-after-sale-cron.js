@@ -25,7 +25,7 @@ Usage:
 
 Options:
   --brand <BRAND_CODE>        Brand code for this run. Overrides config/env.
-  --months <N>                Export the previous N months. Default: 6.
+  --months <N>                Export up to the previous N months. Default: 6.
   --download-dir <DIR>        Directory for downloaded xlsx files.
   --config <PATH>             Custom config file path.
   --start-date YYYY-MM-DD     Explicit start date for backfill.
@@ -221,8 +221,8 @@ function buildDateRange(args) {
     startDate = args.startDate;
   } else {
     const end = localDateFromString(endDate);
-    const start = new Date(end.getFullYear(), end.getMonth(), end.getDate());
-    start.setMonth(start.getMonth() - args.months);
+    const start = addMonthsClamped(end, -args.months);
+    start.setDate(start.getDate() + 1);
     startDate = formatLocalDate(start);
   }
 
@@ -249,6 +249,17 @@ function formatLocalDate(date) {
 function localDateFromString(value) {
   const [year, month, day] = value.split('-').map(Number);
   return new Date(year, month - 1, day);
+}
+
+function addMonthsClamped(date, monthDelta) {
+  const target = new Date(date.getFullYear(), date.getMonth() + monthDelta, 1);
+  const targetMonthDays = daysInMonth(target.getFullYear(), target.getMonth());
+  target.setDate(Math.min(date.getDate(), targetMonthDays));
+  return target;
+}
+
+function daysInMonth(year, monthIndex) {
+  return new Date(year, monthIndex + 1, 0).getDate();
 }
 
 async function login(config) {
@@ -663,8 +674,15 @@ async function main() {
   }
 }
 
-main().catch((error) => {
-  const message = error && error.message ? error.message : String(error);
-  console.error(`[${new Date().toISOString()}] ERROR ${message}`);
-  process.exitCode = 1;
-});
+if (require.main === module) {
+  main().catch((error) => {
+    const message = error && error.message ? error.message : String(error);
+    console.error(`[${new Date().toISOString()}] ERROR ${message}`);
+    process.exitCode = 1;
+  });
+}
+
+module.exports = {
+  buildDateRange,
+  parseArgs,
+};
