@@ -17,6 +17,15 @@ Use the bundled `new-erp-after-sale-cron.js` script to export New ERP after-sale
 
 ## Configuration
 
+Before the first real run, collect these values from the user:
+
+- ERP username
+- ERP password
+- Default brand code, such as `YS`, `JY`, or `HX`
+- Download directory
+
+Create the config file before running the exporter. Never proceed to a real export with placeholder credentials, and never print the password back to the user.
+
 Use this default config path:
 
 ```text
@@ -38,6 +47,7 @@ Use this config shape:
 Set permissions when creating config on Unix-like systems:
 
 ```bash
+mkdir -p ~/.config/new-erp-after-sale-cron
 chmod 700 ~/.config/new-erp-after-sale-cron
 chmod 600 ~/.config/new-erp-after-sale-cron/config.json
 ```
