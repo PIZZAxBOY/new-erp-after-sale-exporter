@@ -1,45 +1,39 @@
-# New ERP After-Sale Complaint Exporter
+# New ERP 售后客诉导出工具
 
-Pure Node.js script for exporting New ERP after-sale complaint tickets and downloading the result as an `.xlsx` file. By default it exports all brands; pass `--brand` only when a single brand is needed.
+用于导出 New ERP 售后客诉数据，生成 `.xlsx` 文件。默认导出全部品牌；只有需要单独导出某个品牌时，才传入 `--brand`。
 
-ERP base URL:
+默认开启售后图片导出：图片会写入同一个导出目录，并插入到同一个 `.xlsx` 文件的 `图片预览` 列。
 
-```text
-https://new-erp.sz-jyhc.com/
-```
-
-## Files
+## 文件
 
 ```text
-new-erp-after-sale-cron.js  Main Node.js script
-SKILL.md                   Codex skill instructions for using the script
-README.md                  Human-facing usage notes
+new-erp-after-sale-cron.js  主脚本
+SKILL.md                   Agent 使用规则
+README.md                  使用说明
 ```
 
-## Requirements
+## 运行要求
 
 - Node.js >= 18
-- No npm dependencies
-- Uses Node native `fetch`, `fs`, `path`, `os`, and `process`
-- Does not require browser cookies, copied tokens, or external CLI tools
+- 无 npm 依赖
+- 不需要浏览器 Cookie、手动复制 token 或外部 CLI
 
-## Configuration
+## 配置
 
-Before a real run, make sure `baseUrl`, `username`, `password`, and `downloadDir` are configured. If any required value is missing, ask the user for it or set it through config/env vars; do not run with placeholder credentials.
+真实运行前，需要配置以下字段：
 
-Configuration priority:
+- `baseUrl`
+- `username`
+- `password`
+- `downloadDir`
 
-```text
-command line flags > environment variables > config file
-```
-
-Default config file:
+默认配置文件：
 
 ```text
 ~/.config/new-erp-after-sale-cron/config.json
 ```
 
-Example:
+示例：
 
 ```json
 {
@@ -51,16 +45,22 @@ Example:
 }
 ```
 
-`brand` is optional. Leave it empty or omit it to include all brands. Supported brand codes are `JY`, `YS`, and `HX`/`HEX`; use `HX` for the ERP `--brand` parameter, while `HEX` can be used as the display name.
-
-Recommended permissions:
+建议权限：
 
 ```bash
 chmod 700 ~/.config/new-erp-after-sale-cron
 chmod 600 ~/.config/new-erp-after-sale-cron/config.json
 ```
 
-Environment variables:
+配置优先级：
+
+```text
+命令行参数 > 环境变量 > 配置文件
+```
+
+说明：`baseUrl`、`username`、`password` 当前没有命令行参数，建议通过环境变量或配置文件设置。
+
+常用环境变量：
 
 ```text
 ERP_BASE_URL
@@ -68,82 +68,87 @@ ERP_USERNAME
 ERP_PASSWORD
 ERP_BRAND
 ERP_DOWNLOAD_DIR
-ERP_INCLUDE_IMAGES
 ERP_EXCLUDE_LOGISTICS
 ```
 
-`ERP_BRAND` is optional. Leave it unset to include all brands. Supported values are `JY`, `YS`, and `HX`/`HEX`; use `HX` for ERP requests. Image export is on by default; set `ERP_INCLUDE_IMAGES=0` or pass `--no-images` to disable it. Set `ERP_EXCLUDE_LOGISTICS=1` to skip tickets whose售后原因 is `物流投诉` when downloading images.
+`brand` / `ERP_BRAND` 可留空，表示导出全部品牌。支持 `JY`、`YS`、`HX` / `HEX`；请求 ERP 时使用 `HX`。
 
-## Usage
+## 用法
 
 ```bash
+# 导出全部品牌，默认最近 6 个月
 node new-erp-after-sale-cron.js
+
+# 导出单个品牌
 node new-erp-after-sale-cron.js --brand YS
-node new-erp-after-sale-cron.js --brand HX --months 3 --download-dir ./exports
-node new-erp-after-sale-cron.js --config ./config.json --brand JY
-node new-erp-after-sale-cron.js --brand YS --start-date 2026-01-01 --end-date 2026-06-30
+
+# 指定日期范围
+node new-erp-after-sale-cron.js --brand HX --start-date 2026-06-22 --end-date 2026-06-28
+
+# 图片导出时跳过物流投诉
 node new-erp-after-sale-cron.js --brand JY --start-date 2026-06-22 --end-date 2026-06-28 --exclude-logistics
+
+# 不下载图片，只导出客诉表格
 node new-erp-after-sale-cron.js --brand JY --start-date 2026-06-22 --end-date 2026-06-28 --no-images
 ```
 
-Supported flags:
+支持参数：
 
 ```text
---brand <BRAND_CODE>        Optional brand code for this run; omit for all brands
---months <N>                Up to previous N months, default 6
---download-dir <DIR>        Download directory for this run
---config <PATH>             Custom config file path
---start-date YYYY-MM-DD     Explicit start date for backfill
---end-date YYYY-MM-DD       Explicit end date for backfill
---include-images            Download ERP after-sale images; enabled by default
---no-images                 Disable ERP after-sale image export
---exclude-logistics         With image export, skip tickets whose reason is 物流投诉
---help                      Show help
+--brand <BRAND_CODE>        品牌代码；不传则导出全部品牌
+--months <N>                导出最近 N 个月，默认 6
+--download-dir <DIR>        下载目录
+--config <PATH>             自定义配置文件路径
+--start-date YYYY-MM-DD     开始日期
+--end-date YYYY-MM-DD       结束日期
+--include-images            下载售后图片，默认开启
+--no-images                 关闭售后图片导出
+--exclude-logistics         图片导出时跳过售后原因为「物流投诉」的记录
+--help                      查看帮助
 ```
 
-When `--start-date` or `--end-date` is provided, date flags take priority over `--months`.
-For generated month ranges, the start date is moved one day inside the boundary. For example, a 6-month run ending on `2026-06-23` starts at `2025-12-24 00:00:00`, avoiding ERP's "超过半年无法导出" limit.
+如果传入 `--start-date` 或 `--end-date`，日期参数优先于 `--months`。
 
-## Output
+如果日期范围超过 31 天，脚本会自动关闭图片导出并打印提示，避免图片任务过大。
 
-File naming rule:
+## 输出
+
+默认输出结构：
 
 ```text
 <downloadDir>/
-  after-sale-<BRAND_CODE|all-brands>-complaints-<YYYY-MM-DD>-<YYYY-MM-DD>/
-    after-sale-<BRAND_CODE|all-brands>-complaints-<YYYY-MM-DD>-<YYYY-MM-DD>.xlsx
-```
-
-The script validates the downloaded file header as `504b0304` before writing the final `.xlsx`. It writes a temporary file first and then renames it to avoid partial files.
-
-Images are enabled by default. When enabled, the script inserts image previews into the same complaints xlsx in a `图片预览` column and writes relative image paths in a `图片地址` column. Original downloaded image files are kept directly under the same export folder:
-
-```text
-<downloadDir>/
-  after-sale-<BRAND_CODE|all-brands>-complaints-<YYYY-MM-DD>-<YYYY-MM-DD>/
+  after-sale-<BRAND_CODE|all-brands>-complaints-<START>-<END>/
+    after-sale-<BRAND_CODE|all-brands>-complaints-<START>-<END>.xlsx
     images/
 ```
 
-No separate image index/preview xlsx/json/csv files or nested image export folders are generated. If the selected date range is longer than 31 days, the script disables image export and logs a warning.
+说明：
 
-## Validation
+- `.xlsx` 会包含 `图片地址` 和 `图片预览` 列。
+- `图片地址` 使用相对路径，例如 `images/<ticket-folder>/<file>.jpg`。
+- `图片预览` 插入同一份 `.xlsx`，不会额外生成图片索引表。
+- 使用 `--no-images` 时，只生成 `.xlsx`，不生成 `images/` 目录。
+
+脚本会先校验下载结果是否为 `.xlsx` 文件，再写入临时文件并重命名，避免留下不完整文件。
+
+## 校验
 
 ```bash
 node --check new-erp-after-sale-cron.js
 node new-erp-after-sale-cron.js --help
 ```
 
-Run a real smoke test only when valid ERP credentials and network access are available. Start with a short range so the first run finishes quickly:
+首次真实运行建议使用短日期范围：
 
 ```bash
-node new-erp-after-sale-cron.js --months 1
+node new-erp-after-sale-cron.js --brand JY --start-date 2026-06-22 --end-date 2026-06-28 --no-images
 ```
 
-After the first run verifies login, export creation, download-center matching, and xlsx download, increase the range as needed.
+确认登录、导出任务、下载中心匹配和 `.xlsx` 下载都正常后，再按需启用图片导出或扩大日期范围。
 
-## Notes
+## 注意事项
 
-- Logs must not print passwords or tokens.
-- `after_type_status=3` means complaint after-sale type. Do not replace it with `status=3`.
-- Business requests must send the token in the HTTP header named `token`.
-- The export flow uses the after-sale order export endpoint, then polls download center pages for a completed matching task.
+- 日志不得打印密码或 token。
+- 客诉筛选条件是 `after_type_status=3`，不要替换成 `status=3`。
+- ERP 请求需要把登录返回值放在名为 `token` 的 HTTP header 中。
+- 导出流程会先创建售后订单导出任务，再轮询下载中心，找到匹配任务后下载文件。

@@ -3,26 +3,30 @@ name: new-erp-after-sale-exporter
 description: Export New ERP after-sale complaint xlsx files with customer after-sale images by default.
 ---
 
-# New ERP After-Sale Exporter
+# New ERP 售后客诉导出
 
-Use `new-erp-after-sale-cron.js` for New ERP complaint exports.
+使用 `new-erp-after-sale-cron.js` 导出 New ERP 售后客诉数据。
 
-## Rules
+## 规则
 
-- Node.js >= 18 only; no npm dependencies.
-- Config priority: CLI flags > env vars > config file.
-- Token must be sent in HTTP header `token`.
-- Do not print password/token.
-- Supported brands: `JY`, `YS`, `HX`/`HEX`; use `HX` for ERP `--brand`.
-- Complaint filter is `after_type_status=3`.
-- Images are exported by default; use `--no-images` to disable.
-- If date range is longer than 31 days, images are disabled and the script logs a warning.
+- Node.js >= 18，无 npm 依赖。
+- 真实运行前必须确认 `baseUrl`、`username`、`password`、`downloadDir` 已配置。
+- 配置优先级：命令行参数 > 环境变量 > 配置文件。
+- `baseUrl`、`username`、`password` 没有命令行参数，走环境变量或配置文件。
+- 登录后把 token 放在 HTTP header `token` 中。
+- 不打印密码或 token。
+- 支持品牌：`JY`、`YS`、`HX` / `HEX`；请求 ERP 时使用 `HX`。
+- 客诉筛选条件是 `after_type_status=3`，不要替换成 `status=3`。
+- 默认导出图片；需要关闭时使用 `--no-images`。
+- 日期范围超过 31 天时，图片导出会自动关闭并打印提示。
 
-## Config
+## 配置
 
-Before a real run, check required config. If `baseUrl`, `username`, `password`, or `downloadDir` is missing, ask the user or tell them to set config/env vars. Never run with placeholder credentials.
+默认配置文件：
 
-Default config: `~/.config/new-erp-after-sale-cron/config.json`
+```text
+~/.config/new-erp-after-sale-cron/config.json
+```
 
 ```json
 {
@@ -34,9 +38,9 @@ Default config: `~/.config/new-erp-after-sale-cron/config.json`
 }
 ```
 
-Env vars: `ERP_BASE_URL`, `ERP_USERNAME`, `ERP_PASSWORD`, `ERP_BRAND`, `ERP_DOWNLOAD_DIR`, `ERP_INCLUDE_IMAGES`, `ERP_EXCLUDE_LOGISTICS`.
+常用环境变量：`ERP_BASE_URL`、`ERP_USERNAME`、`ERP_PASSWORD`、`ERP_BRAND`、`ERP_DOWNLOAD_DIR`、`ERP_EXCLUDE_LOGISTICS`。
 
-## Run
+## 运行
 
 ```bash
 node --check new-erp-after-sale-cron.js
@@ -46,7 +50,7 @@ node new-erp-after-sale-cron.js --brand HX --start-date 2026-06-22 --end-date 20
 node new-erp-after-sale-cron.js --brand HX --start-date 2026-06-22 --end-date 2026-06-28 --no-images
 ```
 
-## Output
+## 输出
 
 ```text
 <downloadDir>/
@@ -55,4 +59,9 @@ node new-erp-after-sale-cron.js --brand HX --start-date 2026-06-22 --end-date 20
     images/
 ```
 
-Images are inserted into the same complaints xlsx in a `图片预览` column. The xlsx also includes a `图片地址` column with relative paths under `images/`. Original complaint image files are saved directly under that export folder's `images/` directory. Do not generate separate image xlsx/json/csv files or nested image export folders.
+图片会插入同一份客诉 `.xlsx`：
+
+- `图片地址`：`images/` 下的相对路径。
+- `图片预览`：插入第一张预览图。
+
+不要生成额外的图片索引 `.xlsx`、`.json`、`.csv` 或嵌套图片导出目录。
