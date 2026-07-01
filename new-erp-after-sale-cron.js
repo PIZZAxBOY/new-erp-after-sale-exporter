@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 'use strict';
 
-const fs = require('fs');
 const fsp = require('fs/promises');
 const path = require('path');
 const os = require('os');
@@ -669,7 +668,6 @@ async function exportAfterSaleImages(config, token, dateRange, xlsxPath) {
   const tickets = config.excludeLogistics
     ? fetchedTickets.filter((ticket) => String(ticket.reason_type_name || '').trim() !== '物流投诉')
     : fetchedTickets;
-  const scope = exportScopeLabel(config);
   const imageFolder = path.join(path.dirname(xlsxPath), 'images');
   await fsp.rm(imageFolder, { recursive: true, force: true });
   await fsp.mkdir(imageFolder, { recursive: true });
@@ -759,16 +757,6 @@ async function exportAfterSaleImages(config, token, dateRange, xlsxPath) {
     dedupe: 'same ticket + same image URL',
   });
   return imageFolder;
-}
-
-function toCsv(rows) {
-  if (!rows.length) return '';
-  const headers = Object.keys(rows[0]);
-  const lines = [headers.map(csvValue).join(',')];
-  for (const row of rows) {
-    lines.push(headers.map((header) => csvValue(row[header])).join(','));
-  }
-  return `${lines.join('\n')}\n`;
 }
 
 function relativeImagePath(xlsxPath, imagePath) {
@@ -970,85 +958,6 @@ async function writeRowsWithImagesXlsx(filePath, rows, imageEntries, sheetName) 
     files.set('xl/worksheets/_rels/sheet1.xml.rels', sheetDrawingRelsXml());
     files.set('xl/drawings/drawing1.xml', drawingXml(drawingEntries));
     files.set('xl/drawings/_rels/drawing1.xml.rels', drawingRelsXml(drawingEntries));
-  }
-  await fsp.writeFile(filePath, buildZip(files), { mode: 0o600 });
-}
-
-async function writeXlsx(filePath, sheets) {
-  const normalizedSheets = sheets.map((sheet, index) => ({
-    name: safeSheetName(sheet.name || `Sheet${index + 1}`),
-    rows: rowsToMatrix(sheet.rows || []),
-  }));
-  const files = new Map([
-    ['[Content_Types].xml', contentTypesXml(normalizedSheets.length)],
-    ['_rels/.rels', rootRelsXml()],
-    ['xl/workbook.xml', workbookXml(normalizedSheets)],
-    ['xl/_rels/workbook.xml.rels', workbookRelsXml(normalizedSheets.length)],
-    ['xl/styles.xml', stylesXml()],
-  ]);
-  normalizedSheets.forEach((sheet, index) => {
-    files.set(`xl/worksheets/sheet${index + 1}.xml`, worksheetXml(sheet.rows));
-  });
-  await fsp.writeFile(filePath, buildZip(files), { mode: 0o600 });
-}
-
-async function writeImagePreviewXlsx(filePath, imageIndex, noImageTickets = []) {
-  const rows = imageIndex.map((row) => ({
-    after_sale_no: row.after_sale_no,
-    order_id: row.order_id,
-    transaction_id: row.transaction_id,
-    project: row.project,
-    reason_type_name: row.reason_type_name,
-    sku: row.sku,
-    image_no: row.image_no,
-    image_field: row.image_field,
-    image_path: row.image_path,
-    image_url: row.image_url,
-    image_preview: '',
-  }));
-  const previewMatrix = rowsToMatrix(rows);
-  const noImageMatrix = rowsToMatrix(noImageTickets);
-  const previewCol = previewMatrix[0].length;
-  const imageEntries = [];
-  const files = new Map();
-  const mediaExtensions = [];
-
-  for (let index = 0; index < imageIndex.length; index += 1) {
-    const imagePath = imageIndex[index].image_path;
-    if (!imagePath) continue;
-    let bytes;
-    try {
-      bytes = await fsp.readFile(imagePath);
-    } catch (_error) {
-      continue;
-    }
-    const ext = (extFromUrl(imagePath) || '.jpg').replace(/^\./, '').toLowerCase();
-    const mediaPath = `xl/media/image${imageEntries.length + 1}.${ext}`;
-    files.set(mediaPath, bytes);
-    mediaExtensions.push(ext);
-    imageEntries.push({
-      row: index + 2,
-      col: previewCol,
-      relId: `rId${imageEntries.length + 1}`,
-      mediaPath,
-    });
-  }
-
-  const sheets = [{ name: 'image-preview' }, { name: 'no-image-tickets' }];
-  files.set('[Content_Types].xml', contentTypesXml(sheets.length, mediaExtensions));
-  files.set('_rels/.rels', rootRelsXml());
-  files.set('xl/workbook.xml', workbookXml(sheets));
-  files.set('xl/_rels/workbook.xml.rels', workbookRelsXml(sheets.length));
-  files.set('xl/styles.xml', stylesXml());
-  files.set('xl/worksheets/sheet1.xml', worksheetXml(previewMatrix, {
-    drawingRelId: imageEntries.length ? 'rId1' : undefined,
-    imageRows: new Set(imageEntries.map((entry) => entry.row)),
-  }));
-  files.set('xl/worksheets/sheet2.xml', worksheetXml(noImageMatrix));
-  if (imageEntries.length) {
-    files.set('xl/worksheets/_rels/sheet1.xml.rels', sheetDrawingRelsXml());
-    files.set('xl/drawings/drawing1.xml', drawingXml(imageEntries));
-    files.set('xl/drawings/_rels/drawing1.xml.rels', drawingRelsXml(imageEntries));
   }
   await fsp.writeFile(filePath, buildZip(files), { mode: 0o600 });
 }
