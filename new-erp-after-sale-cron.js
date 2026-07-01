@@ -623,11 +623,6 @@ function safePathSegment(value, fallback = 'NA') {
   return text.replace(/[\\/:*?"<>|\r\n]+/g, '_').replace(/\s+/g, ' ').slice(0, 80);
 }
 
-function csvValue(value) {
-  const text = value === undefined || value === null ? '' : String(value);
-  return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
-}
-
 async function fetchAfterSaleTickets(config, token, dateRange) {
   const tickets = [];
   for (let page = 1; page < 500; page += 1) {
