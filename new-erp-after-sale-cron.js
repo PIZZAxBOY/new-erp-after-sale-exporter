@@ -771,6 +771,11 @@ function toCsv(rows) {
   return `${lines.join('\n')}\n`;
 }
 
+function relativeImagePath(xlsxPath, imagePath) {
+  if (!imagePath) return '';
+  return path.relative(path.dirname(xlsxPath), imagePath).split(path.sep).join('/');
+}
+
 function ticketKeyFromValues(orderId, transactionId, project) {
   return `${project || ''}|${orderId || ''}|${transactionId || ''}`;
 }
@@ -789,7 +794,11 @@ async function insertImagesIntoComplaintXlsx(filePath, imageIndex) {
   const outputRows = rows.map((row, index) => {
     const key = ticketKeyFromValues(row['系统单号'], row['交易号'], row['项目']);
     const images = byKey.get(key) || [];
-    const output = { ...row, 图片数量: images.length, 图片预览: '' };
+    const imagePaths = images
+      .map((image) => relativeImagePath(filePath, image.image_path))
+      .filter(Boolean)
+      .join('；');
+    const output = { ...row, 图片地址: imagePaths, 图片预览: '' };
     if (images.length && images[0].image_path) {
       imageEntries.push({
         row: index + 2,

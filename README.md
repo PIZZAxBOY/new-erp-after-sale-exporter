@@ -116,7 +116,7 @@ File naming rule:
 
 The script validates the downloaded file header as `504b0304` before writing the final `.xlsx`. It writes a temporary file first and then renames it to avoid partial files.
 
-Images are enabled by default. When enabled, the script inserts image previews into the same complaints xlsx in a `图片预览` column and keeps the original downloaded image files directly under the same export folder:
+Images are enabled by default. When enabled, the script inserts image previews into the same complaints xlsx in a `图片预览` column and writes relative image paths in a `图片地址` column. Original downloaded image files are kept directly under the same export folder:
 
 ```text
 <downloadDir>/

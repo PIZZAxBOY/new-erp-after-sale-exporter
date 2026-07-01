@@ -55,4 +55,4 @@ node new-erp-after-sale-cron.js --brand HX --start-date 2026-06-22 --end-date 20
     images/
 ```
 
-Images are inserted into the same complaints xlsx in a `图片预览` column. Original complaint image files are saved directly under that export folder's `images/` directory. Do not generate separate image xlsx/json/csv files or nested image export folders.
+Images are inserted into the same complaints xlsx in a `图片预览` column. The xlsx also includes a `图片地址` column with relative paths under `images/`. Original complaint image files are saved directly under that export folder's `images/` directory. Do not generate separate image xlsx/json/csv files or nested image export folders.
