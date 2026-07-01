@@ -6,6 +6,8 @@ const fsp = require('fs/promises');
 const path = require('path');
 const os = require('os');
 const process = require('process');
+const crypto = require('crypto');
+const zlib = require('zlib');
 
 const DEFAULT_CONFIG_PATH = path.join(os.homedir(), '.config', 'new-erp-after-sale-cron', 'config.json');
 const DEFAULT_MONTHS = 6;
@@ -15,6 +17,8 @@ const POLL_INTERVAL_MS = 5_000;
 const POLL_TIMEOUT_MS = 10 * 60_000;
 const DOWNLOAD_PAGE_SIZE = 100;
 const DOWNLOAD_PAGES_TO_CHECK = 3;
+const AFTER_SALE_LIST_PAGE_SIZE = 100;
+const IMAGE_FIELDS = ['after_sale_img_url', 'img_url', 'quality_img_url'];
 
 function usage() {
   return `
@@ -30,6 +34,9 @@ Options:
   --config <PATH>             Custom config file path.
   --start-date YYYY-MM-DD     Explicit start date for backfill.
   --end-date YYYY-MM-DD       Explicit end date for backfill.
+  --include-images            Download ERP after-sale images. This is the default.
+  --no-images                 Disable ERP after-sale image export.
+  --exclude-logistics         With image export, skip tickets whose reason is 物流投诉.
   --help                      Show this help.
 
 Environment variables:
@@ -38,6 +45,8 @@ Environment variables:
   ERP_PASSWORD
   ERP_BRAND
   ERP_DOWNLOAD_DIR
+  ERP_INCLUDE_IMAGES
+  ERP_EXCLUDE_LOGISTICS
 
 Default config file:
   ${DEFAULT_CONFIG_PATH}
@@ -59,6 +68,8 @@ function parseArgs(argv) {
   const args = {
     months: DEFAULT_MONTHS,
     help: false,
+    includeImages: true,
+    excludeLogistics: false,
   };
 
   for (let i = 0; i < argv.length; i += 1) {
@@ -79,9 +90,24 @@ function parseArgs(argv) {
       '--start-date',
       '--end-date',
     ]);
+    const booleanOptions = new Set([
+      '--include-images',
+      '--no-images',
+      '--exclude-logistics',
+    ]);
 
     if (key === '--help') {
       args.help = true;
+      continue;
+    }
+
+    if (booleanOptions.has(key)) {
+      if (value !== undefined) {
+        fail(`${key} does not accept a value`);
+      }
+      if (key === '--include-images') args.includeImages = true;
+      if (key === '--no-images') args.includeImages = false;
+      if (key === '--exclude-logistics') args.excludeLogistics = true;
       continue;
     }
 
@@ -161,6 +187,8 @@ async function loadConfig(args) {
     password: firstDefined(undefined, process.env.ERP_PASSWORD, fileConfig.password),
     brand: firstDefined(args.brand, process.env.ERP_BRAND, fileConfig.brand),
     downloadDir: firstDefined(args.downloadDir, process.env.ERP_DOWNLOAD_DIR, fileConfig.downloadDir),
+    includeImages: firstDefined(args.includeImages ? '1' : '0', process.env.ERP_INCLUDE_IMAGES, fileConfig.includeImages),
+    excludeLogistics: firstDefined(args.excludeLogistics ? '1' : undefined, process.env.ERP_EXCLUDE_LOGISTICS, fileConfig.excludeLogistics),
     configPath,
   };
 
@@ -177,6 +205,8 @@ async function loadConfig(args) {
   config.baseUrl = String(config.baseUrl).replace(/\/+$/, '');
   config.brand = config.brand ? String(config.brand).trim() : '';
   config.downloadDir = path.resolve(String(config.downloadDir));
+  config.includeImages = parseBoolean(config.includeImages);
+  config.excludeLogistics = parseBoolean(config.excludeLogistics);
 
   if (!/^https?:\/\//i.test(config.baseUrl)) {
     fail('baseUrl must start with http:// or https://');
@@ -192,6 +222,12 @@ function firstDefined(...values) {
     }
   }
   return undefined;
+}
+
+function parseBoolean(value) {
+  if (value === true || value === false) return value;
+  const text = String(value || '').trim().toLowerCase();
+  return ['1', 'true', 'yes', 'y', 'on'].includes(text);
 }
 
 async function readJsonIfExists(filePath) {
@@ -234,6 +270,12 @@ function buildDateRange(args) {
     endDateTime: `${endDate} 23:59:59`,
     createdAt: `${startDate} 00:00:00 & ${endDate} 23:59:59`,
   };
+}
+
+function dateRangeDays(dateRange) {
+  const start = localDateFromString(dateRange.startDate);
+  const end = localDateFromString(dateRange.endDate);
+  return Math.floor((end - start) / 86_400_000) + 1;
 }
 
 function formatLocalDate(date) {
@@ -506,8 +548,11 @@ async function downloadXlsx(config, token, task, dateRange) {
 
   await fsp.mkdir(config.downloadDir, { recursive: true });
   const scope = exportScopeLabel(config);
-  const fileName = `after-sale-${scope}-complaints-${dateRange.startDate}-${dateRange.endDate}.xlsx`;
-  const finalPath = path.join(config.downloadDir, fileName);
+  const folderName = `after-sale-${scope}-complaints-${dateRange.startDate}-${dateRange.endDate}`;
+  const outputDir = path.join(config.downloadDir, folderName);
+  await fsp.mkdir(outputDir, { recursive: true });
+  const fileName = `${folderName}.xlsx`;
+  const finalPath = path.join(outputDir, fileName);
   const tmpPath = `${finalPath}.tmp-${process.pid}-${Date.now()}`;
 
   await fsp.writeFile(tmpPath, bytes, { mode: 0o600 });
@@ -523,6 +568,694 @@ async function downloadXlsx(config, token, task, dateRange) {
 
   return finalPath;
 }
+
+
+function splitImageUrls(value) {
+  if (!value) return [];
+  const raw = Array.isArray(value) ? value.join(',') : String(value);
+  return raw
+    .split(/[,，;；\s]+/)
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .filter((item) => !['无', '-', 'null', 'undefined'].includes(item.toLowerCase()));
+}
+
+function collectTicketImages(ticket) {
+  const imageRows = [];
+  const children = Array.isArray(ticket.child) ? ticket.child : [];
+  for (const child of children) {
+    for (const field of IMAGE_FIELDS) {
+      for (const url of splitImageUrls(child[field])) {
+        imageRows.push({
+          field,
+          url,
+          sku: child.sku || '',
+          childId: child.id || '',
+        });
+      }
+    }
+  }
+  return imageRows;
+}
+
+function normalizeUrl(config, url) {
+  if (/^https?:\/\//i.test(url)) return url;
+  return new URL(String(url).replace(/^\/+/, ''), `${config.baseUrl}/`).toString();
+}
+
+function extFromContentType(type) {
+  const lower = String(type || '').toLowerCase();
+  if (lower.includes('png')) return '.png';
+  if (lower.includes('gif')) return '.gif';
+  if (lower.includes('webp')) return '.webp';
+  if (lower.includes('bmp')) return '.bmp';
+  if (lower.includes('jpeg') || lower.includes('jpg')) return '.jpg';
+  return '';
+}
+
+function extFromUrl(url) {
+  const clean = String(url || '').split('?')[0].split('#')[0];
+  const ext = path.extname(clean);
+  return ext && ext.length <= 8 ? ext : '';
+}
+
+function safePathSegment(value, fallback = 'NA') {
+  const text = String(value || '').trim() || fallback;
+  return text.replace(/[\\/:*?"<>|\r\n]+/g, '_').replace(/\s+/g, ' ').slice(0, 80);
+}
+
+function csvValue(value) {
+  const text = value === undefined || value === null ? '' : String(value);
+  return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+}
+
+async function fetchAfterSaleTickets(config, token, dateRange) {
+  const tickets = [];
+  for (let page = 1; page < 500; page += 1) {
+    const params = new URLSearchParams({
+      page: String(page),
+      pageSize: String(AFTER_SALE_LIST_PAGE_SIZE),
+      after_type_status: '3',
+      created_at: dateRange.createdAt,
+    });
+    if (config.brand) params.set('auction_site', config.brand);
+
+    const response = await requestJson(config, {
+      method: 'GET',
+      route: `/index.php?r=/customerService/after-sale-order/index&${params.toString()}`,
+      token,
+    });
+    const data = response && response.data;
+    const list = data && Array.isArray(data.list) ? data.list : [];
+    tickets.push(...list);
+    const total = Number((data && data.totalCount) || 0);
+    if (!list.length || (total && tickets.length >= total)) break;
+  }
+  return tickets;
+}
+
+async function downloadImage(config, token, url, outPath) {
+  const response = await requestRaw(config, { method: 'GET', route: url, token });
+  const bytes = Buffer.from(await response.arrayBuffer());
+  await fsp.writeFile(outPath, bytes, { mode: 0o600 });
+  return {
+    bytes: bytes.length,
+    contentType: response.headers.get('content-type') || '',
+  };
+}
+
+async function exportAfterSaleImages(config, token, dateRange, xlsxPath) {
+  const fetchedTickets = await fetchAfterSaleTickets(config, token, dateRange);
+  const tickets = config.excludeLogistics
+    ? fetchedTickets.filter((ticket) => String(ticket.reason_type_name || '').trim() !== '物流投诉')
+    : fetchedTickets;
+  const scope = exportScopeLabel(config);
+  const imageFolder = path.join(path.dirname(xlsxPath), 'images');
+  await fsp.rm(imageFolder, { recursive: true, force: true });
+  await fsp.mkdir(imageFolder, { recursive: true });
+
+  const imageIndex = [];
+  const noImageTickets = [];
+  const downloaded = new Map();
+
+  for (const ticket of tickets) {
+    const ticketImages = collectTicketImages(ticket);
+    const uniqueImages = [];
+    const seenUrls = new Set();
+    for (const image of ticketImages) {
+      const fullUrl = normalizeUrl(config, image.url);
+      if (seenUrls.has(fullUrl)) continue;
+      seenUrls.add(fullUrl);
+      uniqueImages.push({ ...image, fullUrl });
+    }
+
+    if (!uniqueImages.length) {
+      noImageTickets.push({
+        id: ticket.id || '',
+        after_sale_no: ticket.after_sale_no || '',
+        order_id: ticket.order_id || '',
+        transaction_id: ticket.transaction_id || '',
+        project: ticket.project || '',
+        reason_type_name: ticket.reason_type_name || '',
+      });
+      continue;
+    }
+
+    const ticketDir = path.join(
+      imageFolder,
+      `${safePathSegment(ticket.after_sale_no || ticket.id)}_${safePathSegment(ticket.project || config.brand || 'ALL')}_${safePathSegment(ticket.order_id)}`,
+    );
+    await fsp.mkdir(ticketDir, { recursive: true });
+
+    let imageNo = 0;
+    for (const image of uniqueImages) {
+      imageNo += 1;
+      const hash = crypto.createHash('sha1').update(image.fullUrl).digest('hex').slice(0, 12);
+      let ext = extFromUrl(image.fullUrl) || '.jpg';
+      const baseName = `${String(imageNo).padStart(2, '0')}_${safePathSegment(image.sku)}_${hash}`;
+      let outPath = path.join(ticketDir, `${baseName}${ext}`);
+
+      if (downloaded.has(image.fullUrl)) {
+        await fsp.copyFile(downloaded.get(image.fullUrl), outPath);
+      } else {
+        const result = await downloadImage(config, token, image.fullUrl, outPath);
+        const detected = extFromContentType(result.contentType);
+        if (!extFromUrl(image.fullUrl) && detected && detected !== ext) {
+          const renamed = path.join(ticketDir, `${baseName}${detected}`);
+          await fsp.rename(outPath, renamed);
+          outPath = renamed;
+          ext = detected;
+        }
+        downloaded.set(image.fullUrl, outPath);
+      }
+
+      imageIndex.push({
+        id: ticket.id || '',
+        after_sale_no: ticket.after_sale_no || '',
+        order_id: ticket.order_id || '',
+        transaction_id: ticket.transaction_id || '',
+        project: ticket.project || '',
+        reason_type_name: ticket.reason_type_name || '',
+        sku: image.sku,
+        child_id: image.childId,
+        image_no: imageNo,
+        image_field: image.field,
+        image_path: outPath,
+        image_url: image.fullUrl,
+      });
+    }
+  }
+
+  await insertImagesIntoComplaintXlsx(xlsxPath, imageIndex);
+
+  log('Downloaded after-sale images', {
+    updatedXlsx: xlsxPath,
+    imageFolder,
+    ticketsFetched: fetchedTickets.length,
+    ticketsAfterFilter: tickets.length,
+    ticketsWithImages: new Set(imageIndex.map((row) => row.id || row.after_sale_no)).size,
+    images: imageIndex.length,
+    ticketsWithoutImages: noImageTickets.length,
+    dedupe: 'same ticket + same image URL',
+  });
+  return imageFolder;
+}
+
+function toCsv(rows) {
+  if (!rows.length) return '';
+  const headers = Object.keys(rows[0]);
+  const lines = [headers.map(csvValue).join(',')];
+  for (const row of rows) {
+    lines.push(headers.map((header) => csvValue(row[header])).join(','));
+  }
+  return `${lines.join('\n')}\n`;
+}
+
+function ticketKeyFromValues(orderId, transactionId, project) {
+  return `${project || ''}|${orderId || ''}|${transactionId || ''}`;
+}
+
+async function insertImagesIntoComplaintXlsx(filePath, imageIndex) {
+  const parsed = await readFirstWorksheet(filePath);
+  const rows = parsed.objects.map((row) => ({ ...row }));
+  const byKey = new Map();
+  for (const image of imageIndex) {
+    const key = ticketKeyFromValues(image.order_id, image.transaction_id, image.project);
+    if (!byKey.has(key)) byKey.set(key, []);
+    byKey.get(key).push(image);
+  }
+
+  const imageEntries = [];
+  const outputRows = rows.map((row, index) => {
+    const key = ticketKeyFromValues(row['系统单号'], row['交易号'], row['项目']);
+    const images = byKey.get(key) || [];
+    const output = { ...row, 图片数量: images.length, 图片预览: '' };
+    if (images.length && images[0].image_path) {
+      imageEntries.push({
+        row: index + 2,
+        colName: '图片预览',
+        imagePath: images[0].image_path,
+      });
+    }
+    return output;
+  });
+
+  await writeRowsWithImagesXlsx(filePath, outputRows, imageEntries, 'complaints');
+}
+
+async function readFirstWorksheet(filePath) {
+  const entries = readZipEntries(await fsp.readFile(filePath));
+  const workbook = entries.get('xl/workbook.xml').toString('utf8');
+  const firstSheetMatch = workbook.match(/<sheet\b[^>]*r:id="([^"]+)"/);
+  if (!firstSheetMatch) fail(`Cannot find first worksheet in ${filePath}`);
+  const rels = entries.get('xl/_rels/workbook.xml.rels').toString('utf8');
+  const relPattern = new RegExp(`<Relationship[^>]*Id="${escapeRegExp(firstSheetMatch[1])}"[^>]*Target="([^"]+)"`);
+  const relMatch = rels.match(relPattern);
+  const sheetPath = relMatch ? `xl/${relMatch[1].replace(/^\/+/, '')}` : 'xl/worksheets/sheet1.xml';
+  const sheetXml = entries.get(sheetPath).toString('utf8');
+  const sharedStrings = entries.has('xl/sharedStrings.xml')
+    ? parseSharedStrings(entries.get('xl/sharedStrings.xml').toString('utf8'))
+    : [];
+  const matrix = parseWorksheetMatrix(sheetXml, sharedStrings);
+  const headers = matrix[0] || [];
+  const objects = matrix.slice(1).filter((row) => row.some((value) => value !== '')).map((row) => {
+    const object = {};
+    headers.forEach((header, index) => {
+      object[header || `Column${index + 1}`] = row[index] || '';
+    });
+    return object;
+  });
+  return { headers, objects };
+}
+
+function parseSharedStrings(xml) {
+  const result = [];
+  for (const match of xml.matchAll(/<si[\s\S]*?<\/si>/g)) {
+    const text = Array.from(match[0].matchAll(/<t[^>]*>([\s\S]*?)<\/t>/g))
+      .map((part) => xmlUnescape(part[1]))
+      .join('');
+    result.push(text);
+  }
+  return result;
+}
+
+function parseWorksheetMatrix(xml, sharedStrings) {
+  const rows = [];
+  for (const rowMatch of xml.matchAll(/<row\b[^>]*r="(\d+)"[^>]*>([\s\S]*?)<\/row>/g)) {
+    const rowIndex = Number(rowMatch[1]);
+    const values = [];
+    for (const cellMatch of rowMatch[2].matchAll(/<c\b([^>]*)>([\s\S]*?)<\/c>/g)) {
+      const attrs = cellMatch[1];
+      const body = cellMatch[2];
+      const ref = (attrs.match(/r="([A-Z]+)\d+"/) || [])[1];
+      if (!ref) continue;
+      const col = columnNumber(ref);
+      const type = (attrs.match(/t="([^"]+)"/) || [])[1];
+      let value = '';
+      if (type === 'inlineStr') {
+        value = Array.from(body.matchAll(/<t[^>]*>([\s\S]*?)<\/t>/g)).map((part) => xmlUnescape(part[1])).join('');
+      } else {
+        const v = (body.match(/<v>([\s\S]*?)<\/v>/) || [])[1];
+        if (v !== undefined) {
+          value = type === 's' ? (sharedStrings[Number(v)] || '') : xmlUnescape(v);
+        }
+      }
+      values[col - 1] = value;
+    }
+    rows[rowIndex - 1] = values.map((value) => value === undefined ? '' : value);
+  }
+  return rows.filter(Boolean);
+}
+
+function columnNumber(name) {
+  let number = 0;
+  for (const char of name) {
+    number = number * 26 + char.charCodeAt(0) - 64;
+  }
+  return number;
+}
+
+function xmlUnescape(value) {
+  return String(value || '')
+    .replace(/&apos;/g, "'")
+    .replace(/&quot;/g, '"')
+    .replace(/&gt;/g, '>')
+    .replace(/&lt;/g, '<')
+    .replace(/&amp;/g, '&');
+}
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function readZipEntries(buffer) {
+  const eocdOffset = buffer.lastIndexOf(Buffer.from([0x50, 0x4b, 0x05, 0x06]));
+  if (eocdOffset < 0) fail('Invalid xlsx: EOCD not found');
+  const entryCount = buffer.readUInt16LE(eocdOffset + 10);
+  const centralOffset = buffer.readUInt32LE(eocdOffset + 16);
+  const entries = new Map();
+  let offset = centralOffset;
+  for (let i = 0; i < entryCount; i += 1) {
+    if (buffer.readUInt32LE(offset) !== 0x02014b50) fail('Invalid xlsx: central directory is corrupt');
+    const method = buffer.readUInt16LE(offset + 10);
+    const compressedSize = buffer.readUInt32LE(offset + 20);
+    const fileNameLength = buffer.readUInt16LE(offset + 28);
+    const extraLength = buffer.readUInt16LE(offset + 30);
+    const commentLength = buffer.readUInt16LE(offset + 32);
+    const localOffset = buffer.readUInt32LE(offset + 42);
+    const name = buffer.subarray(offset + 46, offset + 46 + fileNameLength).toString('utf8');
+    const localNameLength = buffer.readUInt16LE(localOffset + 26);
+    const localExtraLength = buffer.readUInt16LE(localOffset + 28);
+    const dataStart = localOffset + 30 + localNameLength + localExtraLength;
+    const compressed = buffer.subarray(dataStart, dataStart + compressedSize);
+    let data;
+    if (method === 0) data = compressed;
+    else if (method === 8) data = zlib.inflateRawSync(compressed);
+    else fail(`Unsupported xlsx compression method ${method} for ${name}`);
+    entries.set(name, data);
+    offset += 46 + fileNameLength + extraLength + commentLength;
+  }
+  return entries;
+}
+
+async function writeRowsWithImagesXlsx(filePath, rows, imageEntries, sheetName) {
+  const matrix = rowsToMatrix(rows);
+  const headers = matrix[0];
+  const colByName = new Map(headers.map((header, index) => [header, index + 1]));
+  const files = new Map();
+  const drawingEntries = [];
+  const mediaExtensions = [];
+
+  for (const entry of imageEntries) {
+    const col = colByName.get(entry.colName);
+    if (!col || !entry.imagePath) continue;
+    let bytes;
+    try {
+      bytes = await fsp.readFile(entry.imagePath);
+    } catch (_error) {
+      continue;
+    }
+    const ext = (extFromUrl(entry.imagePath) || '.jpg').replace(/^\./, '').toLowerCase();
+    const mediaPath = `xl/media/image${drawingEntries.length + 1}.${ext}`;
+    files.set(mediaPath, bytes);
+    mediaExtensions.push(ext);
+    drawingEntries.push({
+      row: entry.row,
+      col,
+      relId: `rId${drawingEntries.length + 1}`,
+      mediaPath,
+    });
+  }
+
+  const sheets = [{ name: safeSheetName(sheetName || 'complaints') }];
+  files.set('[Content_Types].xml', contentTypesXml(1, mediaExtensions));
+  files.set('_rels/.rels', rootRelsXml());
+  files.set('xl/workbook.xml', workbookXml(sheets));
+  files.set('xl/_rels/workbook.xml.rels', workbookRelsXml(1));
+  files.set('xl/styles.xml', stylesXml());
+  files.set('xl/worksheets/sheet1.xml', worksheetXml(matrix, {
+    drawingRelId: drawingEntries.length ? 'rId1' : undefined,
+    imageRows: new Set(drawingEntries.map((entry) => entry.row)),
+  }));
+  if (drawingEntries.length) {
+    files.set('xl/worksheets/_rels/sheet1.xml.rels', sheetDrawingRelsXml());
+    files.set('xl/drawings/drawing1.xml', drawingXml(drawingEntries));
+    files.set('xl/drawings/_rels/drawing1.xml.rels', drawingRelsXml(drawingEntries));
+  }
+  await fsp.writeFile(filePath, buildZip(files), { mode: 0o600 });
+}
+
+async function writeXlsx(filePath, sheets) {
+  const normalizedSheets = sheets.map((sheet, index) => ({
+    name: safeSheetName(sheet.name || `Sheet${index + 1}`),
+    rows: rowsToMatrix(sheet.rows || []),
+  }));
+  const files = new Map([
+    ['[Content_Types].xml', contentTypesXml(normalizedSheets.length)],
+    ['_rels/.rels', rootRelsXml()],
+    ['xl/workbook.xml', workbookXml(normalizedSheets)],
+    ['xl/_rels/workbook.xml.rels', workbookRelsXml(normalizedSheets.length)],
+    ['xl/styles.xml', stylesXml()],
+  ]);
+  normalizedSheets.forEach((sheet, index) => {
+    files.set(`xl/worksheets/sheet${index + 1}.xml`, worksheetXml(sheet.rows));
+  });
+  await fsp.writeFile(filePath, buildZip(files), { mode: 0o600 });
+}
+
+async function writeImagePreviewXlsx(filePath, imageIndex, noImageTickets = []) {
+  const rows = imageIndex.map((row) => ({
+    after_sale_no: row.after_sale_no,
+    order_id: row.order_id,
+    transaction_id: row.transaction_id,
+    project: row.project,
+    reason_type_name: row.reason_type_name,
+    sku: row.sku,
+    image_no: row.image_no,
+    image_field: row.image_field,
+    image_path: row.image_path,
+    image_url: row.image_url,
+    image_preview: '',
+  }));
+  const previewMatrix = rowsToMatrix(rows);
+  const noImageMatrix = rowsToMatrix(noImageTickets);
+  const previewCol = previewMatrix[0].length;
+  const imageEntries = [];
+  const files = new Map();
+  const mediaExtensions = [];
+
+  for (let index = 0; index < imageIndex.length; index += 1) {
+    const imagePath = imageIndex[index].image_path;
+    if (!imagePath) continue;
+    let bytes;
+    try {
+      bytes = await fsp.readFile(imagePath);
+    } catch (_error) {
+      continue;
+    }
+    const ext = (extFromUrl(imagePath) || '.jpg').replace(/^\./, '').toLowerCase();
+    const mediaPath = `xl/media/image${imageEntries.length + 1}.${ext}`;
+    files.set(mediaPath, bytes);
+    mediaExtensions.push(ext);
+    imageEntries.push({
+      row: index + 2,
+      col: previewCol,
+      relId: `rId${imageEntries.length + 1}`,
+      mediaPath,
+    });
+  }
+
+  const sheets = [{ name: 'image-preview' }, { name: 'no-image-tickets' }];
+  files.set('[Content_Types].xml', contentTypesXml(sheets.length, mediaExtensions));
+  files.set('_rels/.rels', rootRelsXml());
+  files.set('xl/workbook.xml', workbookXml(sheets));
+  files.set('xl/_rels/workbook.xml.rels', workbookRelsXml(sheets.length));
+  files.set('xl/styles.xml', stylesXml());
+  files.set('xl/worksheets/sheet1.xml', worksheetXml(previewMatrix, {
+    drawingRelId: imageEntries.length ? 'rId1' : undefined,
+    imageRows: new Set(imageEntries.map((entry) => entry.row)),
+  }));
+  files.set('xl/worksheets/sheet2.xml', worksheetXml(noImageMatrix));
+  if (imageEntries.length) {
+    files.set('xl/worksheets/_rels/sheet1.xml.rels', sheetDrawingRelsXml());
+    files.set('xl/drawings/drawing1.xml', drawingXml(imageEntries));
+    files.set('xl/drawings/_rels/drawing1.xml.rels', drawingRelsXml(imageEntries));
+  }
+  await fsp.writeFile(filePath, buildZip(files), { mode: 0o600 });
+}
+
+function sheetDrawingRelsXml() {
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing1.xml"/></Relationships>`;
+}
+
+function drawingXml(entries) {
+  const anchors = entries.map((entry, index) => {
+    const col = entry.col - 1;
+    const row = entry.row - 1;
+    const id = index + 1;
+    return `<xdr:oneCellAnchor><xdr:from><xdr:col>${col}</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>${row}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from><xdr:ext cx="1524000" cy="1047750"/><xdr:pic><xdr:nvPicPr><xdr:cNvPr id="${id}" name="Image ${id}"/><xdr:cNvPicPr/></xdr:nvPicPr><xdr:blipFill><a:blip r:embed="${entry.relId}"/><a:stretch><a:fillRect/></a:stretch></xdr:blipFill><xdr:spPr><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></xdr:spPr></xdr:pic><xdr:clientData/></xdr:oneCellAnchor>`;
+  }).join('');
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">${anchors}</xdr:wsDr>`;
+}
+
+function drawingRelsXml(entries) {
+  const rels = entries.map((entry) => `<Relationship Id="${entry.relId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/${path.basename(entry.mediaPath)}"/>`).join('');
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${rels}</Relationships>`;
+}
+
+function rowsToMatrix(rows) {
+  if (!rows.length) return [['说明'], ['无']];
+  const headers = Object.keys(rows[0]);
+  const matrix = [headers];
+  for (const row of rows) {
+    matrix.push(headers.map((header) => row[header]));
+  }
+  return matrix;
+}
+
+function safeSheetName(value) {
+  const cleaned = String(value || 'Sheet').replace(/[\\/?*:[\]]/g, ' ').trim() || 'Sheet';
+  return cleaned.slice(0, 31);
+}
+
+function contentTypesXml(sheetCount, mediaExtensions = []) {
+  const mediaDefaults = Array.from(new Set(mediaExtensions.map((ext) => ext.replace(/^\./, '').toLowerCase()).filter(Boolean)))
+    .map((ext) => `<Default Extension="${xmlEscape(ext)}" ContentType="${imageContentType(ext)}"/>`)
+    .join('');
+  const sheetOverrides = Array.from({ length: sheetCount }, (_, index) => (
+    `<Override PartName="/xl/worksheets/sheet${index + 1}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`
+  )).join('');
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/>${mediaDefaults}<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>${sheetOverrides}</Types>`;
+}
+
+function imageContentType(ext) {
+  const lower = String(ext || '').replace(/^\./, '').toLowerCase();
+  if (lower === 'png') return 'image/png';
+  if (lower === 'gif') return 'image/gif';
+  if (lower === 'bmp') return 'image/bmp';
+  if (lower === 'webp') return 'image/webp';
+  return 'image/jpeg';
+}
+
+function rootRelsXml() {
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>`;
+}
+
+function workbookXml(sheets) {
+  const sheetXml = sheets.map((sheet, index) => `<sheet name="${xmlEscape(sheet.name)}" sheetId="${index + 1}" r:id="rId${index + 1}"/>`).join('');
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>${sheetXml}</sheets></workbook>`;
+}
+
+function workbookRelsXml(sheetCount, drawingCount = 0) {
+  const rels = Array.from({ length: sheetCount }, (_, index) => (
+    `<Relationship Id="rId${index + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet${index + 1}.xml"/>`
+  ));
+  rels.push(`<Relationship Id="rId${sheetCount + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>`);
+  for (let index = 0; index < drawingCount; index += 1) {
+    rels.push(`<Relationship Id="rId${sheetCount + 2 + index}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="drawings/drawing${index + 1}.xml"/>`);
+  }
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${rels.join('')}</Relationships>`;
+}
+
+function stylesXml() {
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><name val="Calibri"/></font></fonts><fills count="3"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FFD9EAF7"/><bgColor indexed="64"/></patternFill></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="2" borderId="0" xfId="0" applyFont="1" applyFill="1"/></cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>`;
+}
+
+function worksheetXml(rows, options = {}) {
+  const columnCount = rows.reduce((max, row) => Math.max(max, row.length), 0);
+  const cols = Array.from({ length: columnCount }, (_, index) => {
+    const width = Math.min(60, Math.max(12, rows.slice(0, 80).reduce((max, row) => Math.max(max, String(row[index] ?? '').length), 0) + 2));
+    return `<col min="${index + 1}" max="${index + 1}" width="${width}" customWidth="1"/>`;
+  }).join('');
+  const rowXml = rows.map((row, rowIndex) => {
+    const cells = row.map((value, colIndex) => cellXml(value, rowIndex + 1, colIndex + 1, rowIndex === 0)).join('');
+    const height = options.imageRows && options.imageRows.has(rowIndex + 1) ? ' ht="95" customHeight="1"' : '';
+    return `<row r="${rowIndex + 1}"${height}>${cells}</row>`;
+  }).join('');
+  const ref = columnCount ? `A1:${columnName(columnCount)}${Math.max(rows.length, 1)}` : 'A1:A1';
+  const drawing = options.drawingRelId ? `<drawing r:id="${options.drawingRelId}"/>` : '';
+  const relNs = options.drawingRelId ? ' xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"' : '';
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"${relNs}><dimension ref="${ref}"/><sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews><cols>${cols}</cols><sheetData>${rowXml}</sheetData><autoFilter ref="${ref}"/>${drawing}</worksheet>`;
+}
+
+function cellXml(value, row, col, isHeader) {
+  const ref = `${columnName(col)}${row}`;
+  const style = isHeader ? ' s="1"' : '';
+  if (value === undefined || value === null || value === '') {
+    return `<c r="${ref}"${style}/>`;
+  }
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return `<c r="${ref}"${style}><v>${value}</v></c>`;
+  }
+  return `<c r="${ref}" t="inlineStr"${style}><is><t>${xmlEscape(String(value))}</t></is></c>`;
+}
+
+function columnName(index) {
+  let name = '';
+  let n = index;
+  while (n > 0) {
+    const remainder = (n - 1) % 26;
+    name = String.fromCharCode(65 + remainder) + name;
+    n = Math.floor((n - 1) / 26);
+  }
+  return name;
+}
+
+function xmlEscape(value) {
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;')
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, '');
+}
+
+function buildZip(files) {
+  const localParts = [];
+  const centralParts = [];
+  let offset = 0;
+  for (const [name, content] of files.entries()) {
+    const nameBuffer = Buffer.from(name, 'utf8');
+    const dataBuffer = Buffer.isBuffer(content) ? content : Buffer.from(content, 'utf8');
+    const crc = crc32(dataBuffer);
+    const localHeader = Buffer.alloc(30);
+    localHeader.writeUInt32LE(0x04034b50, 0);
+    localHeader.writeUInt16LE(20, 4);
+    localHeader.writeUInt16LE(0x0800, 6);
+    localHeader.writeUInt16LE(0, 8);
+    localHeader.writeUInt16LE(0, 10);
+    localHeader.writeUInt16LE(0, 12);
+    localHeader.writeUInt32LE(crc, 14);
+    localHeader.writeUInt32LE(dataBuffer.length, 18);
+    localHeader.writeUInt32LE(dataBuffer.length, 22);
+    localHeader.writeUInt16LE(nameBuffer.length, 26);
+    localHeader.writeUInt16LE(0, 28);
+    localParts.push(localHeader, nameBuffer, dataBuffer);
+
+    const centralHeader = Buffer.alloc(46);
+    centralHeader.writeUInt32LE(0x02014b50, 0);
+    centralHeader.writeUInt16LE(20, 4);
+    centralHeader.writeUInt16LE(20, 6);
+    centralHeader.writeUInt16LE(0x0800, 8);
+    centralHeader.writeUInt16LE(0, 10);
+    centralHeader.writeUInt16LE(0, 12);
+    centralHeader.writeUInt16LE(0, 14);
+    centralHeader.writeUInt32LE(crc, 16);
+    centralHeader.writeUInt32LE(dataBuffer.length, 20);
+    centralHeader.writeUInt32LE(dataBuffer.length, 24);
+    centralHeader.writeUInt16LE(nameBuffer.length, 28);
+    centralHeader.writeUInt16LE(0, 30);
+    centralHeader.writeUInt16LE(0, 32);
+    centralHeader.writeUInt16LE(0, 34);
+    centralHeader.writeUInt16LE(0, 36);
+    centralHeader.writeUInt32LE(0, 38);
+    centralHeader.writeUInt32LE(offset, 42);
+    centralParts.push(centralHeader, nameBuffer);
+    offset += localHeader.length + nameBuffer.length + dataBuffer.length;
+  }
+  const centralDirectory = Buffer.concat(centralParts);
+  const localData = Buffer.concat(localParts);
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0);
+  end.writeUInt16LE(0, 4);
+  end.writeUInt16LE(0, 6);
+  end.writeUInt16LE(files.size, 8);
+  end.writeUInt16LE(files.size, 10);
+  end.writeUInt32LE(centralDirectory.length, 12);
+  end.writeUInt32LE(localData.length, 16);
+  end.writeUInt16LE(0, 20);
+  return Buffer.concat([localData, centralDirectory, end]);
+}
+
+function crc32(buffer) {
+  let crc = 0xffffffff;
+  for (const byte of buffer) {
+    crc = (crc >>> 8) ^ CRC32_TABLE[(crc ^ byte) & 0xff];
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+const CRC32_TABLE = (() => {
+  const table = new Array(256);
+  for (let i = 0; i < 256; i += 1) {
+    let c = i;
+    for (let k = 0; k < 8; k += 1) {
+      c = (c & 1) ? (0xedb88320 ^ (c >>> 1)) : (c >>> 1);
+    }
+    table[i] = c >>> 0;
+  }
+  return table;
+})();
 
 async function requestJson(config, options) {
   const response = await requestRaw(config, options);
@@ -668,6 +1401,15 @@ async function main() {
 
   const config = await loadConfig(args);
   const dateRange = buildDateRange(args);
+  const days = dateRangeDays(dateRange);
+  if (config.includeImages && days > 31) {
+    log('Image export disabled because the selected date range is longer than one month', {
+      start: dateRange.startDate,
+      end: dateRange.endDate,
+      days,
+    });
+    config.includeImages = false;
+  }
   let lockPath;
 
   try {
@@ -678,6 +1420,8 @@ async function main() {
       start: dateRange.startDateTime,
       end: dateRange.endDateTime,
       downloadDir: config.downloadDir,
+      includeImages: config.includeImages,
+      excludeLogistics: config.excludeLogistics,
     });
 
     const token = await login(config);
@@ -686,7 +1430,11 @@ async function main() {
     await createExportTask(config, token, dateRange);
     const task = await waitForTask(config, token, dateRange);
     const filePath = await downloadXlsx(config, token, task, dateRange);
-    log('Finished', { file: filePath });
+    let imageFolder;
+    if (config.includeImages) {
+      imageFolder = await exportAfterSaleImages(config, token, dateRange, filePath);
+    }
+    log('Finished', { file: filePath, imageFolder });
   } finally {
     await releaseLock(lockPath);
   }
@@ -703,4 +1451,7 @@ if (require.main === module) {
 module.exports = {
   buildDateRange,
   parseArgs,
+  splitImageUrls,
+  collectTicketImages,
+  insertImagesIntoComplaintXlsx,
 };

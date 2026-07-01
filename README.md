@@ -25,6 +25,8 @@ README.md                  Human-facing usage notes
 
 ## Configuration
 
+Before a real run, make sure `baseUrl`, `username`, `password`, and `downloadDir` are configured. If any required value is missing, ask the user for it or set it through config/env vars; do not run with placeholder credentials.
+
 Configuration priority:
 
 ```text
@@ -49,7 +51,7 @@ Example:
 }
 ```
 
-`brand` is optional. Leave it empty or omit it to include all brands.
+`brand` is optional. Leave it empty or omit it to include all brands. Supported brand codes are `JY`, `YS`, and `HX`/`HEX`; use `HX` for the ERP `--brand` parameter, while `HEX` can be used as the display name.
 
 Recommended permissions:
 
@@ -66,9 +68,11 @@ ERP_USERNAME
 ERP_PASSWORD
 ERP_BRAND
 ERP_DOWNLOAD_DIR
+ERP_INCLUDE_IMAGES
+ERP_EXCLUDE_LOGISTICS
 ```
 
-`ERP_BRAND` is optional. Leave it unset to include all brands.
+`ERP_BRAND` is optional. Leave it unset to include all brands. Supported values are `JY`, `YS`, and `HX`/`HEX`; use `HX` for ERP requests. Image export is on by default; set `ERP_INCLUDE_IMAGES=0` or pass `--no-images` to disable it. Set `ERP_EXCLUDE_LOGISTICS=1` to skip tickets whose售后原因 is `物流投诉` when downloading images.
 
 ## Usage
 
@@ -78,6 +82,8 @@ node new-erp-after-sale-cron.js --brand YS
 node new-erp-after-sale-cron.js --brand HX --months 3 --download-dir ./exports
 node new-erp-after-sale-cron.js --config ./config.json --brand JY
 node new-erp-after-sale-cron.js --brand YS --start-date 2026-01-01 --end-date 2026-06-30
+node new-erp-after-sale-cron.js --brand JY --start-date 2026-06-22 --end-date 2026-06-28 --exclude-logistics
+node new-erp-after-sale-cron.js --brand JY --start-date 2026-06-22 --end-date 2026-06-28 --no-images
 ```
 
 Supported flags:
@@ -89,6 +95,9 @@ Supported flags:
 --config <PATH>             Custom config file path
 --start-date YYYY-MM-DD     Explicit start date for backfill
 --end-date YYYY-MM-DD       Explicit end date for backfill
+--include-images            Download ERP after-sale images; enabled by default
+--no-images                 Disable ERP after-sale image export
+--exclude-logistics         With image export, skip tickets whose reason is 物流投诉
 --help                      Show help
 ```
 
@@ -100,10 +109,22 @@ For generated month ranges, the start date is moved one day inside the boundary.
 File naming rule:
 
 ```text
-after-sale-<BRAND_CODE|all-brands>-complaints-<YYYY-MM-DD>-<YYYY-MM-DD>.xlsx
+<downloadDir>/
+  after-sale-<BRAND_CODE|all-brands>-complaints-<YYYY-MM-DD>-<YYYY-MM-DD>/
+    after-sale-<BRAND_CODE|all-brands>-complaints-<YYYY-MM-DD>-<YYYY-MM-DD>.xlsx
 ```
 
 The script validates the downloaded file header as `504b0304` before writing the final `.xlsx`. It writes a temporary file first and then renames it to avoid partial files.
+
+Images are enabled by default. When enabled, the script inserts image previews into the same complaints xlsx in a `图片预览` column and keeps the original downloaded image files directly under the same export folder:
+
+```text
+<downloadDir>/
+  after-sale-<BRAND_CODE|all-brands>-complaints-<YYYY-MM-DD>-<YYYY-MM-DD>/
+    images/
+```
+
+No separate image index/preview xlsx/json/csv files or nested image export folders are generated. If the selected date range is longer than 31 days, the script disables image export and logs a warning.
 
 ## Validation
 
